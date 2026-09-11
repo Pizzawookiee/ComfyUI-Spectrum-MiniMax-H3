@@ -860,7 +860,54 @@ def diffusion_model_wrapper(
             denoise_mask=kwargs.get("denoise_mask"),
             audio_denoise_mask=kwargs.get("audio_denoise_mask"),
         )
+
+        debug_cuda = runtime.config.debug and video_x.device.type == "cuda"
+        if debug_cuda:
+            benchmark_device = video_x.device
+            torch.cuda.synchronize(benchmark_device)
+            torch.cuda.reset_peak_memory_stats(benchmark_device)
+            forecast_before_allocated = torch.cuda.memory_allocated(benchmark_device)
+            forecast_before_reserved = torch.cuda.memory_reserved(benchmark_device)
+            forecast_started = time.perf_counter()
+
         output = _execute_forecast(inner, sanitized, state, video_x, audio_x)
+
+        if debug_cuda:
+            torch.cuda.synchronize(benchmark_device)
+            forecast_ms = (time.perf_counter() - forecast_started) * 1000.0
+            forecast_peak_allocated = torch.cuda.max_memory_allocated(benchmark_device)
+            forecast_peak_reserved = torch.cuda.max_memory_reserved(benchmark_device)
+
+            del state
+            del sanitized
+            del predicted
+            torch.cuda.synchronize(benchmark_device)
+
+            forecast_after_allocated = torch.cuda.memory_allocated(benchmark_device)
+            forecast_after_reserved = torch.cuda.memory_reserved(benchmark_device)
+            mib = 1024.0 * 1024.0
+
+            LOG.warning(
+                "Spectrum H3 CUDA forecast benchmark "
+                "run_id=%s step=%s call=%s path=monolithic "
+                "latency_ms=%.3f "
+                "before_allocated_mib=%.1f "
+                "before_reserved_mib=%.1f "
+                "peak_allocated_mib=%.1f "
+                "peak_reserved_mib=%.1f "
+                "after_allocated_mib=%.1f "
+                "after_reserved_mib=%.1f",
+                run_id,
+                step_id,
+                call_id,
+                forecast_ms,
+                forecast_before_allocated / mib,
+                forecast_before_reserved / mib,
+                forecast_peak_allocated / mib,
+                forecast_peak_reserved / mib,
+                forecast_after_allocated / mib,
+                forecast_after_reserved / mib,
+            )
     except torch.cuda.OutOfMemoryError:
         raise
     except (RuntimeError, TypeError, ValueError) as exc:
